@@ -1,0 +1,39 @@
+name: probe
+on:
+  push:
+    branches: ['ci/probe-*']
+  workflow_dispatch:
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install -q onnxruntime onnx numpy
+      - run: python probe.py
+  main-overlay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install -q onnxruntime onnx numpy
+      - name: overlay main python files
+        run: |
+          set -e
+          SP=$(python -c "import onnxruntime,os;print(os.path.dirname(onnxruntime.__file__))")
+          B=https://raw.githubusercontent.com/microsoft/onnxruntime/main
+          curl -sSfL $B/tools/python/util/onnx_model_utils.py -o $SP/tools/onnx_model_utils.py
+          curl -sSfL $B/tools/python/util/mobile_helpers/usability_checker.py -o $SP/tools/mobile_helpers/usability_checker.py
+          curl -sSfL $B/onnxruntime/python/tools/quantization/calibrate.py -o $SP/quantization/calibrate.py
+      - run: python probe.py
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install -q onnx numpy coloredlogs flatbuffers packaging protobuf sympy
+      - run: pip install -q --pre --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime
+      - run: python probe.py
