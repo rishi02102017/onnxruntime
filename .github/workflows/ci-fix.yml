@@ -1,0 +1,108 @@
+name: ci-fix-is-fixed-size-tensor
+on:
+  push:
+    branches: ['ci/fix-is-fixed-size-tensor']
+  workflow_dispatch:
+env:
+  BASE_SHA: 54cbb5815dc1b4522493b6e916b6200f5cf7bbf8
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            tools/python/util
+            onnxruntime/python
+            pyproject.toml
+            .lintrunner.toml
+            requirements-lintrunner.txt
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: ruff (repo config, pinned version)
+        run: |
+          pip install -q ruff==0.12.12
+          F="tools/python/util/onnx_model_utils.py tools/python/util/test/test_onnx_model_utils.py"
+          ruff check --config pyproject.toml $F
+          ruff format --config pyproject.toml --check --diff $F
+      - name: lintrunner on changed files
+        run: |
+          pip install -q -r requirements-lintrunner.txt
+          lintrunner init
+          lintrunner --force-color tools/python/util/onnx_model_utils.py tools/python/util/test/test_onnx_model_utils.py
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ort: [release, nightly]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /tools/python/
+            /ci_check/
+            /tools/ci_build/github/android/*.md
+            /tools/ci_build/github/apple/*.md
+            /onnxruntime/test/testdata/CNTK/test_LSTM.tanh.bidirectional/
+            /onnxruntime/test/testdata/gh_issue_9671.onnx
+            /onnxruntime/test/testdata/fuse_mul_1.onnx
+            /onnxruntime/test/testdata/transform/fusion/bias_gelu_fusion.onnx
+            /onnxruntime/test/testdata/sklearn_bin_voting_classifier_soft.onnx
+            /onnxruntime/test/testdata/mnist.onnx
+            /onnxruntime/test/testdata/scan_1.onnx
+            /onnxruntime/test/testdata/abs_free_dimensions.onnx
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: install onnxruntime
+        run: |
+          pip install -q onnx numpy testfixtures coloredlogs flatbuffers packaging protobuf sympy
+          if [ "${{ matrix.ort }}" = release ]; then
+            pip install -q onnxruntime==1.32.0
+          else
+            pip install -q --pre --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime
+          fi
+          python -c "import onnxruntime, onnx; print('ort', onnxruntime.__version__, 'onnx', onnx.__version__)"
+      - name: BASELINE repo tests with unmodified main onnx_model_utils.py (expected to fail)
+        continue-on-error: true
+        working-directory: tools/python
+        run: |
+          cp util/onnx_model_utils.py /tmp/fixed_onnx_model_utils.py
+          curl -sSfL https://raw.githubusercontent.com/microsoft/onnxruntime/$BASE_SHA/tools/python/util/onnx_model_utils.py -o util/onnx_model_utils.py
+          git diff --stat
+          rc=0
+          python -m unittest -v util/test/test_onnx_model_utils.py || rc=$?
+          echo "=== baseline test_usability_checker.py"
+          python -m unittest -v util/mobile_helpers/test/test_usability_checker.py || true
+          python -c "import logging,sys,pathlib; logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(message)s'); from util.mobile_helpers.usability_checker import analyze_model; analyze_model(pathlib.Path(sys.argv[1]).resolve(), False, logging.getLogger('default'))" ../../onnxruntime/test/testdata/scan_1.onnx > /tmp/scan_baseline.log 2>&1 || true
+          cp /tmp/fixed_onnx_model_utils.py util/onnx_model_utils.py
+          git diff --exit-code
+          exit $rc
+      - name: FIXED repo tests test_onnx_model_utils.py
+        working-directory: tools/python
+        run: python -m unittest -v util/test/test_onnx_model_utils.py
+      - name: FIXED repo tests test_usability_checker.py
+        continue-on-error: true
+        working-directory: tools/python
+        run: python -m unittest -v util/mobile_helpers/test/test_usability_checker.py
+      - name: usability_checker output on scan_1.onnx, baseline vs fixed
+        working-directory: tools/python
+        run: |
+          python -c "import logging,sys,pathlib; logging.basicConfig(level=logging.DEBUG, format='%(levelname)s %(message)s'); from util.mobile_helpers.usability_checker import analyze_model; analyze_model(pathlib.Path(sys.argv[1]).resolve(), False, logging.getLogger('default'))" ../../onnxruntime/test/testdata/scan_1.onnx > /tmp/scan_fixed.log 2>&1 || true
+          # node order inside a group comes from set iteration, so compare the INFO/WARNING summary lines only
+          for f in baseline fixed; do grep -E "^(INFO|WARNING) " /tmp/scan_$f.log > /tmp/scan_$f.info || true; done
+          wc -l /tmp/scan_baseline.info /tmp/scan_fixed.info
+          diff /tmp/scan_baseline.info /tmp/scan_fixed.info && echo "IDENTICAL"
+          grep -i "partitions with a total\|as is" /tmp/scan_fixed.log || tail -5 /tmp/scan_fixed.log
+      - name: FIXED repo tests test_vcpkg_helpers.py
+        working-directory: tools/python
+        run: python -m unittest -v util/test/test_vcpkg_helpers.py
+      - name: BASELINE installed package repro (expected to fail)
+        continue-on-error: true
+        run: python ci_check/repro.py
+      - name: FIXED installed package repro (repo file copied over installed onnxruntime/tools)
+        run: |
+          SP=$(python -c "import onnxruntime,os;print(os.path.dirname(onnxruntime.__file__))")
+          cp tools/python/util/onnx_model_utils.py $SP/tools/onnx_model_utils.py
+          python ci_check/repro.py
